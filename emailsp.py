@@ -1,108 +1,117 @@
 # -*- coding: utf-8 -*-
 """
-Created on Wed Nov 13 15:59:04 2024
+Created on Wed Nov 13 15:47:41 2024
 
-@author: nannib
+@author: Nanni Bassetti - nannibassetti.com
 """
 import re
 import dns.resolver
 from email import message_from_string
 from email.policy import default
 
-def query_dns(domain, record_type):
-    """
-    Interroga il DNS per verificare la presenza di record DKIM, DMARC o SPF.
-    """
-    try:
-        if record_type == "DMARC":
-            query = f"_dmarc.{domain}"
-        elif record_type == "SPF":
-            query = domain
-        elif record_type == "DKIM":
-            # Si presume che il selettore sia "default"; in un caso reale, si richiederebbe il selettore corretto
-            query = f"default._domainkey.{domain}"
-        else:
-            return None
-        answers = dns.resolver.resolve(query, 'TXT')
-        return [rdata.to_text() for rdata in answers]
-    except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
-        return None
-
-def parse_email_header(header_text):
-    """
-    Analizza l'header di un'email e individua anomalie, incluse verifiche DNS per DKIM, DMARC e SPF.
-    """
-    
-    msg = message_from_string(header_text, policy=default)
-    anomalies = {}
+def analizza_header_da_file(nome_file):
+    with open(nome_file, "r") as file:
+        header = file.read()
+    msg = message_from_string(header, policy=default)
+    # Estrai dominio dal campo From e verifica Reply-To
+    dominio_mittente = estrai_dominio(header, "From")
+    dominio_reply_to = estrai_dominio(header, "Reply-to")
     
     # Estrazione dominio mittente
     from_address = msg.get("From")
-    domain = from_address.split('@')[-1] if from_address else ""
-
+    #dominio = from_address.split('@')[-1] if from_address else ""
+    
     # 1. Verifica del campo From e Reply-To
-    reply_to = msg.get("Reply-To")
-    if reply_to and reply_to != from_address:
-        anomalies['Reply-To'] = f"Il campo Reply-To ({reply_to}) è diverso dal From ({from_address})."
-
-    # 2. Verifica della presenza di DKIM, DMARC e SPF nei DNS del mittente
-    dkim_record = query_dns(domain, "DKIM")
-    if not dkim_record:
-        anomalies['DKIM'] = f"Record DKIM mancante o non configurato correttamente per il dominio del mittente ({domain})."
-    
-    dmarc_record = query_dns(domain, "DMARC")
-    if not dmarc_record:
-        anomalies['DMARC'] = f"Record DMARC mancante o non configurato correttamente per il dominio del mittente ({domain})."
-    
-    spf_record = query_dns(domain, "SPF")
-    if not spf_record or not any("v=spf1" in txt for txt in spf_record):
-        anomalies['SPF'] = f"Record SPF mancante o non configurato correttamente per il dominio del mittente ({domain})."
-
-    # 3. Verifica del campo Authentication-Results per i controlli del destinatario
-    auth_results = msg.get("Authentication-Results")
-    if auth_results:
-        dkim_pass = "dkim=pass" in auth_results.lower()
-        dmarc_pass = "dmarc=pass" in auth_results.lower()
-        spf_pass = "spf=pass" in auth_results.lower()
-
-        if dkim_pass and dmarc_pass and spf_pass:
-            anomalies['Destinatario Check'] = "Il destinatario ha attivato e passato i controlli DKIM, DMARC e SPF."
-        else:
-            if "dkim=fail" in auth_results.lower() or "dkim=none" in auth_results.lower():
-                anomalies['DKIM Check'] = "Il destinatario non ha validato DKIM o ha riscontrato un errore."
-            if "dmarc=fail" in auth_results.lower():
-                anomalies['DMARC Check'] = "Il destinatario non ha validato DMARC o ha riscontrato un errore."
-            if "spf=fail" in auth_results.lower() or "spf=none" in auth_results.lower():
-                anomalies['SPF Check'] = "Il destinatario non ha validato SPF o ha riscontrato un errore."
+    reply_to = msg.get("Reply-to")
+    if reply_to != from_address:
+        print(f"Il campo Reply-To ({reply_to}) è diverso dal From ({from_address}).")
     else:
-        anomalies['Authentication-Results'] = "Il destinatario non ha incluso i risultati di autenticazione (SPF/DKIM/DMARC)."
+        print(f"Il campo Reply-To ({reply_to}) è uguale al From ({from_address}).")
 
-    # 4. Verifica del campo Received per server di inoltro sospetti
-    received_fields = msg.get_all("Received")
-    if received_fields:
-        unusual_servers = []
-        
-        for received in received_fields:
-            match = re.search(r'from\s+([\w.-]+)', received)
-            if match:
-                server = match.group(1)
-                if domain not in server:  # Il server non appartiene al dominio del mittente
-                    unusual_servers.append(server)
-        
-        if unusual_servers:
-            anomalies['Received'] = f"Server non riconosciuti nella catena di Received: {', '.join(unusual_servers)}"
+    if dominio_mittente and dominio_reply_to:
+        if dominio_mittente != dominio_reply_to:
+            print("Anomalia: Il dominio di 'From' e 'Reply-To' non coincidono!")
+        else:
+            print("Mittente e Reply-To sono coerenti.")
 
-    return anomalies
+    # Estrai selettore DKIM dall'header e verifica DKIM
+    selettore_dkim = estrai_selettore_dkim(header)
+    if selettore_dkim and dominio_mittente:
+        verifica_dkim(selettore_dkim, dominio_mittente)
+    else:
+        print("Selettore DKIM non trovato o dominio mittente non disponibile.")
 
-# Lettura dell'header da file header.txt
-with open("header.txt", "r") as file:
-    header_text = file.read()
+    # Verifica configurazioni SPF e DMARC per il dominio del mittente
+    if dominio_mittente:
+        verifica_spf(dominio_mittente)
+        verifica_dmarc(dominio_mittente)
+        verifica_catena_received(header,dominio_mittente)
 
-# Esecuzione dell'analisi e visualizzazione dei risultati
-anomalies = parse_email_header(header_text)
-if anomalies:
-    print("Anomalie trovate nell'header:")
-    for key, value in anomalies.items():
-        print(f"- {key}: {value}")
-else:
-    print("Nessuna anomalia rilevata nell'header.")
+    # Controllo anomalie nei server della catena Received
+    
+
+# Funzione per estrarre il dominio dal campo specificato dell'header
+def estrai_dominio(header, campo):
+    match = re.search(rf"{campo}:.*@([\w\.-]+)", header)
+    if match:
+        return match.group(1)
+    return None
+
+# Funzione per estrarre il selettore DKIM dal campo Authentication-Results
+def estrai_selettore_dkim(header):
+    match = re.search(r"Authentication-Results:.*dkim=.*?header.s=([\w-]+)", header, re.DOTALL)
+    if match:
+        return match.group(1)
+    return None
+
+# Funzione per verificare il record DKIM
+def verifica_dkim(selettore, dominio):
+    try:
+        dkim_query = f"{selettore}._domainkey.{dominio}"
+        answers = dns.resolver.resolve(dkim_query, 'TXT')
+        dkim_presente = any("v=DKIM1" in str(rdata) for rdata in answers)
+        if dkim_presente:
+            print(f"DKIM configurato correttamente per {dominio} con selettore '{selettore}'.")
+        else:
+            print(f"DKIM non configurato correttamente per {dominio}.")
+    except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+        print(f"DKIM non trovato per {dominio} con selettore '{selettore}'.")
+
+# Funzione per verificare il record SPF
+def verifica_spf(dominio):
+    try:
+        answers = dns.resolver.resolve(dominio, 'TXT')
+        spf_presente = any("v=spf1" in str(rdata) for rdata in answers)
+        if spf_presente:
+            print(f"SPF configurato correttamente per {dominio}.")
+        else:
+            print(f"SPF non configurato per {dominio}.")
+    except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+        print(f"SPF non trovato per {dominio}.")
+
+# Funzione per verificare il record DMARC
+def verifica_dmarc(dominio):
+    try:
+        dmarc_query = f"_dmarc.{dominio}"
+        answers = dns.resolver.resolve(dmarc_query, 'TXT')
+        dmarc_presente = any("v=DMARC1" in str(rdata) for rdata in answers)
+        if dmarc_presente:
+            print(f"DMARC configurato correttamente per {dominio}.")
+        else:
+            print(f"DMARC non configurato per {dominio}.")
+    except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+        print(f"DMARC non trovato per {dominio}.")
+
+# Funzione per verificare la catena dei server Received
+def verifica_catena_received(header,dominio):
+    received_servers = re.findall(r"Received: from ([\w\.-]+)", header)
+    domini_autorizzati = [dominio]  # Esempio di domini legittimi
+
+    # Analizza ciascun server nella catena `Received`
+    for server in received_servers:
+        if not any(server.endswith(dominio) for dominio in domini_autorizzati):
+            print(f"Anomalia: Server non riconosciuto nella catena di Received: {server}")
+
+# Esecuzione del programma
+analizza_header_da_file("header.txt")
+
