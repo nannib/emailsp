@@ -5,6 +5,7 @@ You only need to put in the same directory the header.txt file containing the he
 Enjoy it!
 
 ITALIAN
+
 Devi solo mettere nella stessa directory il file header.txt contenente l'intestazione dell'e-mail che devi analizzare.
 Buon divertimento!
 
